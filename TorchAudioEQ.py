@@ -1,21 +1,21 @@
 import torch
 import torchaudio
+import torchaudio.functional as F
+import torchaudio.transforms as T
+from typing import Optional, Tuple
 
-class STFTBaseAudioEQProcessor:
-    def __init__(self, sample_rate=44100, n_fft=2048, hop_length=512, device='cpu', 
-                 dtype=torch.float32):
+class TorchAudioEQProcessor:
+    def __init__(self, sample_rate: int = 44100, device: str = 'cpu', 
+                 dtype: torch.dtype = torch.float32):
         """
-        初始化STFT EQ处理器
+        初始化TorchAudio EQ处理器
         
         参数:
             sample_rate: 采样率 (默认44100)
-            n_fft: STFT的FFT大小 (默认2048)
-            hop_length: STFT的hop长度 (默认512)
+            device: 计算设备 (默认'cpu')
+            dtype: 数据类型 (默认torch.float32)
         """
         self.sample_rate = sample_rate
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.window = torch.hann_window(n_fft)
         self.device = device
         self.dtype = dtype
         
@@ -57,25 +57,11 @@ class STFTBaseAudioEQProcessor:
         b0, b1, b2 = b0 / a0, b1 / a0, b2 / a0
         a1, a2 = a1 / a0, a2 / a0
         
-        freq_bins = self.n_fft // 2 + 1
-        freqs = torch.linspace(0, self.sample_rate / 2, freq_bins, 
-                                    device=device, dtype=dtype)
-        
-        w = 2 * torch.pi * freqs / self.sample_rate
-
-        e_jw = torch.exp(-1j * w)
-        e_jw2 = torch.exp(-2j * w)
-        
-        #H(w) = (b0 + b1*e^{-jw} + b2*e^{-2jw}) / (1 + a1*e^{-jw} + a2*e^{-2jw})
-        n = b0 + b1 * e_jw + b2 * e_jw2
-        d = 1 + a1 * e_jw + a2 * e_jw2
-        h = n / d
-        
-        return h
+        return b0, b1, b2, a1, a2
     
-    def apply_eq(self, audio, center_freq, Q, gain_db):
+    def apply_eq(self, audio: torch.Tensor, center_freq: float, Q: float, gain_db: float) -> torch.Tensor:
         """
-        应用EQ到音频批量处理版本
+        应用EQ到音频
         
         参数:
             audio: 输入音频张量 [batch, samples]
@@ -86,54 +72,23 @@ class STFTBaseAudioEQProcessor:
         返回:
             processed_audio: 处理后的音频
         """
-        batch_size, num_samples = audio.shape
+        b0, b1, b2, a1, a2 = self._design_eq_filter(center_freq, Q, gain_db)
         
-        filter_response = self._design_eq_filter(center_freq, Q, gain_db)
-        filter_response = filter_response.unsqueeze(0).unsqueeze(-1)
-        
-        stft_result = torch.stft(
-            audio,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.n_fft,
-            window=self.window,
-            center=True,
-            pad_mode='reflect',
-            normalized=False,
-            onesided=True,
-            return_complex=True
-        )
-        
+        #a0之前归一化没了
+        a0 = torch.tensor(1.0, device=self.device, dtype=self.dtype)
 
-        # filter_response: [1, freq_bins, 1]
-        # stft_result: [batch, freq_bins, time_frames]
-        stft_result_eq = stft_result * filter_response
+        b_coeffs = torch.stack([b0, b1, b2])
+        a_coeffs = torch.stack([a0, a1, a2])
         
-        output = torch.istft(
-            stft_result_eq,
-            n_fft=self.n_fft,
-            hop_length=self.hop_length,
-            win_length=self.n_fft,
-            window=self.window,
-            center=True,
-            normalized=False,
-            onesided=True,
-            length=num_samples
-        )
-        
+        # 使用torchaudio的lfilter
+        output = F.lfilter(audio, a_coeffs, b_coeffs, clamp=False)
         return output
     
-
-
-
-
-
-
 if __name__ == "__main__":
-    eq_processor = STFTBaseAudioEQProcessor(sample_rate=44100)
+    eq_processor = TorchAudioEQProcessor(sample_rate=44100)
 
     input_path = "input_audio.wav"
-    output_path = "output_audioS.wav"
+    output_path = "output_audioTA.wav"
 
     center_freq = 3000
     Q = 4
@@ -153,4 +108,3 @@ if __name__ == "__main__":
     
     
     print("音频处理完成,已保存到output_audio.wav")
-    
